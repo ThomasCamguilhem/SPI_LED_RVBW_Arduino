@@ -6,20 +6,20 @@
 #define SPI_SCK D13
 #define SPI_SS D10
 
-#define AMB_R 6
+#define AMB_R 3
 #define AMB_G 5
-#define AMB_B 3
+#define AMB_B 6
 #define AMB_W 9
 
-#define VER_R 16
+#define VER_R 14
 #define VER_G 15
-#define VER_B 14
+#define VER_B 16
 
 unsigned int NB_ALIVE = 0;
 int alive = 1000; // ms
 
 Led Red, Green, Blue, White;
-bool V_flash, V_Red, V_Green, V_Blue;
+bool V_flash = 1, V_Red = 1, V_Green = 1, V_Blue = 0;
 long transi = 0;
 
 byte buf [100];
@@ -66,9 +66,9 @@ void setup() {
   White.pin = AMB_W;
 
   /*Red.minPower = 10;
-  Green.minPower = 10;
-  Blue.minPower = 150;
-  White.minPower = 150;
+    Green.minPower = 10;
+    Blue.minPower = 150;
+    White.minPower = 150;
   */
   pinMode(AMB_R, OUTPUT);
   pinMode(AMB_G, OUTPUT);
@@ -89,7 +89,7 @@ void setup() {
   networkStatus = GOOD_CONNECTION;
   White.SetMaxPower(150);
   White.SetDelay(5000);
-  
+
   // have to send on master in, *slave out*
   pinMode(MISO, OUTPUT);
   // turn on SPI in slave mode
@@ -98,8 +98,9 @@ void setup() {
   SPCR |= _BV(SPIE);
   pos = 0;
   process_it = false;
-  
+
   Serial.println("ready to receive as slave");
+  Serial.println("ready to read on serial\nR [0-255] G [0-255] B [0-255] W [0-255] L [RGB]");
 }
 
 
@@ -123,11 +124,11 @@ void loop() {
   if (process_it)
   {
     reception();
-    
+
     pos = 0;
     process_it = false;
   }
-
+  readSerial();
   UpdateLight();
   delay(10);
 }
@@ -218,89 +219,169 @@ void Securite() {
   }
 }
 
+void readSerial(){
+  if (Serial.available() > 0) {
+    do {
+      char cmd = (char)Serial.read();
+      while(Serial.peek() == 0x20 || Serial.peek() == 0x0A)Serial.read();  
+      switch (cmd){
+        case 'R':
+        case 'r':
+          Serial.print("R:");
+          Red.SetMaxPower(toByte());
+          break;
+        case 'G':
+        case 'g':
+          Serial.print("G:");
+          Green.SetMaxPower(toByte());
+          break;
+        case 'B':
+        case 'b':
+          Serial.print("B:");
+          Blue.SetMaxPower(toByte());
+          break;
+        case 'W':
+        case 'w':
+          Serial.print("W:");
+          White.SetMaxPower(toByte());
+          break;
+        case 'L':
+        case 'l':
+          Serial.print("L:");
+          byte out = 0; 
+          byte in = Serial.read();
+          if (in == 0x30) { out = 0; }
+          if (in == 0x31) { out = 1; }
+          out = out << 1;
+          if (Serial.available() && Serial.peek() >= 0x30 && Serial.peek() <= 0x31)
+          {
+            in = Serial.read();
+            if (in == 0x30) { out += 0; }
+            if (in == 0x31) { out += 1; }
+          }
+          out = out << 1;
+          if (Serial.available() && Serial.peek() >= 0x30 && Serial.peek() <= 0x31)
+          {
+            in = Serial.read();
+            if (in == 0x30) { out += 0; }
+            if (in == 0x31) { out += 1; }
+          }
+          Serial.print(out & 4?"R":"_");
+          Serial.print(out & 2?"G":"_");
+          Serial.print(out & 1?"B":"_");
+          V_Red = (out & 4);
+          V_Green = (out & 2);
+          V_Blue = (out & 1);
+          break;
+      }
+      Serial.print(" ");
+      while(Serial.peek() == 0x20 || Serial.peek() == 0x0A)Serial.read(); 
+    } while (Serial.available());
+    Serial.print("\n");
+    Red.SetDelay(1000);
+    Green.SetDelay(1000);
+    Blue.SetDelay(1000);
+    White.SetDelay(1000);
+    Red.Transition();
+    Green.Transition();
+    Blue.Transition();
+    White.Transition();
+  }
+}
+
+byte toByte() {
+  byte value = 0;
+  while(Serial.peek() >= 0x30 && Serial.peek() <= 0x39){
+    value *= 0x0A;
+    value += Serial.read()-0x30;
+  }
+  Serial.print(value, HEX);
+  return value;
+}
+
 void reception ()
 {
-    unsigned long now = millis();
-    int h = now / 3600000;
-    int m = (now / 60000) % 60;
-    int s = (now / 1000) % 60;
-    int ms = now % 1000;
-    String time = String(String("T+: ") + String((h < 10 ? "0" : "")) + String(h) + String(":")
-                                               + (m < 10 ? "0" : "") + String(m) + ":"
-                                               + (s < 10 ? "0" : "") + String(s) + " "
-                                       + String((ms < 100 ? String("0") + String((ms < 10 ? "0" : "")) : "")) + String(ms));
-     Serial.print(time);
-    // the data is 4 bytes for the LED color (rgbw) 
-    // + 1 byte for the lock+timing (3 bits(rgb)+4bits(0-15s)) 
-    // + 2 bytes of checksum + 1 byte for the end code
-   int index = 0;
-   if(pos == 8) { 
-      buf [pos] = 0;
-      uint16_t csum = fletcher16(buf, 5);
-      if (!(buf[5] == (csum & 0xFF)) // check for the data integrity
-       || !(buf[6] == ((csum >> 8) & 0xFF))) {
-        Serial.print(": Data err");
-        Serial.print(": 0x");
-        while (buf[index] != '\n') {
-          if (buf[index] < 10)
-            Serial.print(0, HEX);
-          Serial.print(buf[index++], HEX);
-        }
-        Serial.println("");
-      } else {
-        //Serial.print("received ");
-        //Serial.print(howMany);
-        //Serial.println(" bytes of data");
-        NB_ALIVE ++;
-        //Valeur = 0;
-        Serial.print(": 0x");
-        White.SetMaxPower(buf[0]);    //Serial.println(out);
-        Blue.SetMaxPower(buf[1]);     //Serial.println(out);
-        Green.SetMaxPower(buf[2]);    //Serial.println(out);
-        Red.SetMaxPower(buf[3]);      //Serial.println(out);
-        byte out = buf[4];            //Serial.println(out);
-        if (White.maxPower < 16)
-          Serial.print("0");
-        Serial.print(White.maxPower, HEX);
-        if (Blue.maxPower < 16)
-          Serial.print("0");
-        Serial.print(Blue.maxPower, HEX);
-        if (Green.maxPower < 16)
-          Serial.print("0");
-        Serial.print(Green.maxPower, HEX);
-        if (Red.maxPower < 16)
-          Serial.print("0");
-        Serial.print(Red.maxPower, HEX);
-        if (out < 16)
-          Serial.print("0");
-        Serial.print(out, HEX);
-        V_flash = (out & 8);
-        V_Red = (out & 4);
-        V_Green = (out & 2);
-        V_Blue = (out & 1);
-        transi = (out & 0xF0);
-        transi = (transi >> 4);
-        Red.SetDelay((transi * 1000));
-        Green.SetDelay((transi * 1000));
-        Blue.SetDelay((transi * 1000));
-        White.SetDelay((transi * 1000));
-        Red.Transition();
-        Green.Transition();
-        Blue.Transition();
-        White.Transition();
-        Serial.println(";");
-      }
-    } else {
-      Serial.print(": len err ");
-      Serial.print(pos - 1);
+  unsigned long now = millis();
+  int h = now / 3600000;
+  int m = (now / 60000) % 60;
+  int s = (now / 1000) % 60;
+  int ms = now % 1000;
+  String time = String(String("T+: ") + String((h < 10 ? "0" : "")) + String(h) + String(":")
+                       + (m < 10 ? "0" : "") + String(m) + ":"
+                       + (s < 10 ? "0" : "") + String(s) + " "
+                       + String((ms < 100 ? String("0") + String((ms < 10 ? "0" : "")) : "")) + String(ms));
+  Serial.print(time);
+  // the data is 4 bytes for the LED color (rgbw)
+  // + 1 byte for the lock+timing (3 bits(rgb)+4bits(0-15s))
+  // + 2 bytes of checksum + 1 byte for the end code
+  int index = 0;
+  if (pos == 8) {
+    buf [pos] = 0;
+    uint16_t csum = fletcher16(buf, 5);
+    if (!(buf[5] == (csum & 0xFF)) // check for the data integrity
+        || !(buf[6] == ((csum >> 8) & 0xFF))) {
+      Serial.print(": Data err");
       Serial.print(": 0x");
-        while (buf[index] != '\n') {
-          if (buf[index] < 10)
-            Serial.print(0, HEX);
-          Serial.print(buf[index++], HEX);
-        }
-        Serial.println("");
+      while (buf[index] != '\n') {
+        if (buf[index] < 10)
+          Serial.print(0, HEX);
+        Serial.print(buf[index++], HEX);
+      }
+      Serial.println("");
+    } else {
+      //Serial.print("received ");
+      //Serial.print(howMany);
+      //Serial.println(" bytes of data");
+      NB_ALIVE ++;
+      //Valeur = 0;
+      Serial.print(": 0x");
+      White.SetMaxPower(buf[0]);    //Serial.println(out);
+      Blue.SetMaxPower(buf[1]);     //Serial.println(out);
+      Green.SetMaxPower(buf[2]);    //Serial.println(out);
+      Red.SetMaxPower(buf[3]);      //Serial.println(out);
+      byte out = buf[4];            //Serial.println(out);
+      if (White.maxPower < 16)
+        Serial.print("0");
+      Serial.print(White.maxPower, HEX);
+      if (Blue.maxPower < 16)
+        Serial.print("0");
+      Serial.print(Blue.maxPower, HEX);
+      if (Green.maxPower < 16)
+        Serial.print("0");
+      Serial.print(Green.maxPower, HEX);
+      if (Red.maxPower < 16)
+        Serial.print("0");
+      Serial.print(Red.maxPower, HEX);
+      if (out < 16)
+        Serial.print("0");
+      Serial.print(out, HEX);
+      V_flash = (out & 8);
+      V_Red = (out & 4);
+      V_Green = (out & 2);
+      V_Blue = (out & 1);
+      transi = (out & 0xF0);
+      transi = (transi >> 4);
+      Red.SetDelay((transi * 1000));
+      Green.SetDelay((transi * 1000));
+      Blue.SetDelay((transi * 1000));
+      White.SetDelay((transi * 1000));
+      Red.Transition();
+      Green.Transition();
+      Blue.Transition();
+      White.Transition();
+      Serial.println(";");
     }
+  } else {
+    Serial.print(": len err ");
+    Serial.print(pos - 1);
+    Serial.print(": 0x");
+    while (buf[index] != '\n') {
+      if (buf[index] < 10)
+        Serial.print(0, HEX);
+      Serial.print(buf[index++], HEX);
+    }
+    Serial.println("");
+  }
 }
 
 void UpdateLight()
@@ -313,8 +394,13 @@ void UpdateLight()
     Blue.Transition();
   if (White.isTransition)
     White.Transition();
-  digitalWrite(VER_R, !V_Red);
-  digitalWrite(VER_G, !V_Green);
-  digitalWrite(VER_B, !V_Blue);
+  if (V_flash && (millis() % 1000) < 800) {
+    digitalWrite(VER_R, 0/*V_Red*/);
+    digitalWrite(VER_G, 0/*V_Green*/);
+    digitalWrite(VER_B, 0/*V_Blue*/);
+  } else {
+    digitalWrite(VER_R, !V_Red);
+    digitalWrite(VER_G, !V_Green);
+    digitalWrite(VER_B, !V_Blue);
+  }
 }
-

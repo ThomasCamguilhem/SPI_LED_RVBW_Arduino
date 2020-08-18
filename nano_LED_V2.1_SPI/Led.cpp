@@ -57,4 +57,3 @@ void Led::SetMaxPower(int power)
     done = false;
   }
 }
-
